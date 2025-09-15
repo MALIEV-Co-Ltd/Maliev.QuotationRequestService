@@ -1,30 +1,55 @@
-# See https://aka.ms/customizecontainer to learn how to customize your debug container and how Visual Studio uses this Dockerfile to build your images for faster debugging.
-
-# This stage is used when running from VS in fast mode (Default for Debug configuration)
+# Use the official .NET 9.0 runtime as the base image
 FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS base
-USER $APP_UID
 WORKDIR /app
 EXPOSE 8080
 EXPOSE 8081
 
-
-# This stage is used to build the service project
+# Use the official .NET 9.0 SDK for building
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
-COPY ["Maliev.QuotationRequestService.Api/Maliev.QuotationRequestService.Api.csproj", "Maliev.QuotationRequestService.Api/"]
-RUN dotnet restore "./Maliev.QuotationRequestService.Api/Maliev.QuotationRequestService.Api.csproj"
-COPY . .
-WORKDIR "/src/Maliev.QuotationRequestService.Api"
-RUN dotnet build "./Maliev.QuotationRequestService.Api.csproj" -c $BUILD_CONFIGURATION -o /app/build
 
-# This stage is used to publish the service project to be copied to the final stage
+# Copy project files
+COPY ["Maliev.QuotationRequestService.Api.csproj", "Maliev.QuotationRequestService.Api/"]
+COPY ["../Maliev.QuotationRequestService.Data/Maliev.QuotationRequestService.Data.csproj", "Maliev.QuotationRequestService.Data/"]
+
+# Restore dependencies
+RUN dotnet restore "Maliev.QuotationRequestService.Api/Maliev.QuotationRequestService.Api.csproj"
+
+# Copy all source files
+COPY . Maliev.QuotationRequestService.Api/
+COPY ../Maliev.QuotationRequestService.Data/ Maliev.QuotationRequestService.Data/
+
+# Build the application
+WORKDIR "/src/Maliev.QuotationRequestService.Api"
+RUN dotnet build "Maliev.QuotationRequestService.Api.csproj" -c $BUILD_CONFIGURATION -o /app/build
+
+# Publish the application
 FROM build AS publish
 ARG BUILD_CONFIGURATION=Release
-RUN dotnet publish "./Maliev.QuotationRequestService.Api.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
+RUN dotnet publish "Maliev.QuotationRequestService.Api.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
 
-# This stage is used in production or when running from VS in regular mode (Default when not using the Debug configuration)
+# Final image
 FROM base AS final
 WORKDIR /app
+
+# Copy the published application
 COPY --from=publish /app/publish .
+
+# Set environment variables for production
+ENV ASPNETCORE_ENVIRONMENT=Production
+ENV ASPNETCORE_URLS=http://+:8080
+
+# Create non-root user for security
+RUN addgroup --system --gid 1001 dotnet && \
+    adduser --system --uid 1001 --gid 1001 --shell /bin/false --home /app dotnet
+
+# Change ownership of app directory
+RUN chown -R dotnet:dotnet /app
+USER dotnet
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8080/quotation-requests/liveness || exit 1
+
 ENTRYPOINT ["dotnet", "Maliev.QuotationRequestService.Api.dll"]

@@ -1,172 +1,255 @@
 using Asp.Versioning;
 using Asp.Versioning.ApiExplorer;
+using HealthChecks.UI.Client;
+using Maliev.QuotationRequestService.Api.Configurations;
+using Maliev.QuotationRequestService.Api.HealthChecks;
+using Maliev.QuotationRequestService.Api.Middleware;
+using Maliev.QuotationRequestService.Api.Models;
 using Maliev.QuotationRequestService.Api.Services;
-using Maliev.QuotationRequestService.Api.Services.Implementations;
-using Maliev.QuotationRequestService.Data.Database;
+using Maliev.QuotationRequestService.Data.DbContexts;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
-using Microsoft.OpenApi.Models;
-using System.Reflection;
+using Prometheus;
+using Serilog;
+using Swashbuckle.AspNetCore.SwaggerGen;
 using System.Text;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add AutoMapper
-builder.Services.AddAutoMapper(Assembly.GetExecutingAssembly());
-builder.Services.AddDbContext<QuotationRequestContext>(options =>
-{
-    options.UseSqlServer(builder.Configuration.GetConnectionString("QuotationRequestServiceDbContext"));
-});
+// Configure Serilog
+Log.Logger = new LoggerConfiguration()
+    .ReadFrom.Configuration(builder.Configuration)
+    .WriteTo.Console()
+    .CreateLogger();
 
-// Configure Authentication
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
+builder.Host.UseSerilog();
+
+try
+{
+    Log.Information("Starting Maliev Quotation Request Service");
+
+    // Load secrets from mounted volume in GKE
+    var secretsPath = "/mnt/secrets";
+    if (Directory.Exists(secretsPath))
     {
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidateAudience = true,
-            ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"],
-            ValidAudience = builder.Configuration["Jwt:Audience"],
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["JwtSecurityKey"] ?? throw new InvalidOperationException("JwtSecurityKey not configured"))),
-        };
-    });
-
-// Configure API Versioning Services
-builder.Services.AddApiVersioning(options =>
-{
-    options.ReportApiVersions = true;
-    options.AssumeDefaultVersionWhenUnspecified = true;
-    options.DefaultApiVersion = new ApiVersion(1, 0);
-})
-.AddApiExplorer(options =>
-{
-    options.GroupNameFormat = "'v'VVV";
-    options.SubstituteApiVersionInUrl = true;
-});
-
-// Configure Swagger
-builder.Services.AddSwaggerGen(options =>
-{
-    OpenApiSecurityScheme apiKey = new OpenApiSecurityScheme
-    {
-        Description = "JWT Authorization header using the Bearer scheme. Example: \"Bearer {token}\"",
-        In = ParameterLocation.Header,
-        Name = "Authorization",
-        Type = SecuritySchemeType.ApiKey,
-    };
-
-    OpenApiInfo info = new OpenApiInfo
-    {
-        Title = "Quotation Request Service",
-        Version = "v1", // Explicitly set to v1
-        Contact = new OpenApiContact
-        {
-            Name = "MALIEV Co., Ltd.",
-            Email = "support@maliev.com",
-            Url = new Uri("https://www.maliev.com"),
-        },
-    };
-
-    options.SwaggerDoc("v1", info); // Define a single SwaggerDoc for v1
-    options.AddSecurityDefinition("Bearer", apiKey);
-    options.AddSecurityRequirement(new OpenApiSecurityRequirement
-    {
-        {
-            new OpenApiSecurityScheme
-            {
-                Reference = new OpenApiReference
-                {
-                    Type = ReferenceType.SecurityScheme,
-                    Id = "Bearer",
-                },
-                Scheme = "oauth2",
-                Name = "Bearer",
-                In = ParameterLocation.Header,
-            },
-            new List<string>()
-        },
-    });
-    options.DescribeAllParametersInCamelCase();
-
-    // Set the comments path for the Swagger JSON and UI.
-    var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
-    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
-    options.IncludeXmlComments(xmlPath);
-});
-
-// Configure CORS
-builder.Services.AddCors(options =>
-{
-    options.AddDefaultPolicy(
-        policy =>
-        {
-            policy.WithOrigins(
-                "http://*.maliev.com",
-                "https://*.maliev.com")
-            .SetIsOriginAllowedToAllowWildcardSubdomains()
-            .AllowAnyHeader()
-            .AllowAnyMethod();
-        });
-});
-
-// Register service layer
-builder.Services.AddScoped<IQuotationRequestServiceService, QuotationRequestServiceService>();
-
-builder.Services.AddControllers();
-
-var app = builder.Build();
-
-// Configure Base Path Middleware
-app.UsePathBase("/quotationrequests");
-
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.UseDeveloperExceptionPage();
-    // app.UseMigrationsEndPoint(); // Not using migrations for now
-}
-else
-{
-    app.UseExceptionHandler(errorApp =>
-    {
-        errorApp.Run(async context =>
-        {
-            var exceptionHandlerPathFeature = context.Features.Get<IExceptionHandlerPathFeature>();
-            var exception = exceptionHandlerPathFeature?.Error;
-
-            var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
-            logger.LogError(exception, "An unhandled exception has occurred.");
-
-            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-            await context.Response.WriteAsJsonAsync(new { error = "An unexpected error occurred." });
-        });
-    });
-    app.UseHsts();
-}
-
-app.UseHttpsRedirection();
-
-app.UseCors();
-
-app.UseAuthentication();
-
-app.UseAuthorization();
-
-app.UseSwagger();
-app.UseSwaggerUI(options =>
-{
-    var provider = app.Services.GetRequiredService<IApiVersionDescriptionProvider>();
-    foreach (var description in provider.ApiVersionDescriptions)
-    {
-        options.SwaggerEndpoint($"/quotationrequests/swagger/{description.GroupName}/swagger.json", description.GroupName.ToUpperInvariant());
+        builder.Configuration.AddKeyPerFile(directoryPath: secretsPath, optional: true);
     }
-    options.RoutePrefix = "swagger";
-});
 
-app.MapControllers();
+    // API Versioning
+    builder.Services.AddApiVersioning(options =>
+    {
+        options.DefaultApiVersion = new ApiVersion(1, 0);
+        options.AssumeDefaultVersionWhenUnspecified = true;
+        options.ReportApiVersions = true;
+        options.ApiVersionReader = new UrlSegmentApiVersionReader();
+    }).AddApiExplorer(options =>
+    {
+        options.GroupNameFormat = "'v'VVV";
+        options.SubstituteApiVersionInUrl = true;
+    });
 
-app.Run();
+    // Add controllers
+    builder.Services.AddControllers();
+
+    // Configure QuotationRequest DbContext
+    if (builder.Environment.IsEnvironment("Testing"))
+    {
+        builder.Services.AddDbContext<QuotationRequestDbContext>(options =>
+            options.UseInMemoryDatabase("TestDb"));
+    }
+    else
+    {
+        builder.Services.AddDbContext<QuotationRequestDbContext>(options =>
+        {
+            options.UseNpgsql(builder.Configuration.GetConnectionString("QuotationRequestDbContext"));
+        });
+    }
+
+    // Configure memory cache - CRITICAL: Simple configuration per CLAUDE.md
+    builder.Services.AddMemoryCache();
+
+    // Configure rate limiting
+    builder.Services.AddRateLimiter(options =>
+    {
+        options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+        // Global rate limit for admin operations
+        options.AddPolicy("GlobalPolicy", context =>
+            RateLimitPartition.GetSlidingWindowLimiter(
+                partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                factory: _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit = 1000,
+                    Window = TimeSpan.FromMinutes(1),
+                    SegmentsPerWindow = 2,
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                    QueueLimit = 100
+                }));
+
+        // Quotation request submission rate limit (more restrictive for public)
+        options.AddPolicy("QuotationRequestPolicy", context =>
+            RateLimitPartition.GetSlidingWindowLimiter(
+                partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                factory: _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit = 5,
+                    Window = TimeSpan.FromMinutes(1),
+                    SegmentsPerWindow = 2,
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                    QueueLimit = 3
+                }));
+    });
+
+    // Configure UploadService options
+    builder.Services.Configure<UploadServiceOptions>(builder.Configuration.GetSection(UploadServiceOptions.SectionName));
+
+    // Configure development fallbacks for UploadService
+    if (builder.Environment.IsDevelopment())
+    {
+        builder.Services.Configure<UploadServiceOptions>(options =>
+        {
+            options.BaseUrl = "http://localhost:8080";
+            options.TimeoutSeconds = 30;
+        });
+    }
+
+    // Configure HTTP client for UploadService
+    builder.Services.AddHttpClient<IUploadServiceClient, UploadServiceClient>((serviceProvider, client) =>
+    {
+        var uploadServiceOptions = serviceProvider.GetRequiredService<IOptions<UploadServiceOptions>>().Value;
+        client.BaseAddress = new Uri(uploadServiceOptions.BaseUrl);
+        client.Timeout = TimeSpan.FromSeconds(uploadServiceOptions.TimeoutSeconds);
+    });
+
+    // Register services
+    builder.Services.AddScoped<IQuotationRequestService, Maliev.QuotationRequestService.Api.Services.QuotationRequestService>();
+
+    // Configure Swagger
+    builder.Services.AddTransient<IConfigureOptions<SwaggerGenOptions>, ConfigureSwaggerOptions>();
+    builder.Services.AddSwaggerGen();
+
+    // Configure CORS
+    builder.Services.AddCors(options =>
+    {
+        options.AddDefaultPolicy(policy =>
+        {
+            if (builder.Environment.IsDevelopment())
+            {
+                policy.AllowAnyOrigin()
+                    .AllowAnyHeader()
+                    .AllowAnyMethod();
+            }
+            else
+            {
+                policy.WithOrigins("https://maliev.com", "https://www.maliev.com")
+                    .AllowAnyHeader()
+                    .AllowAnyMethod()
+                    .AllowCredentials();
+            }
+        });
+    });
+
+    builder.Services.AddAuthorization(options =>
+    {
+        options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
+    });
+
+    builder.Services.AddHealthChecks()
+        .AddCheck<DatabaseHealthCheck>("Database Health Check", tags: new[] { "readiness" });
+
+    var app = builder.Build();
+
+    app.UseHttpsRedirection();
+
+    // Configure the HTTP request pipeline
+    if (!app.Environment.IsProduction())
+    {
+        app.UseSwagger(c =>
+        {
+            c.RouteTemplate = "quotation-requests/swagger/{documentName}/swagger.json";
+        });
+        app.UseSwaggerUI(c =>
+        {
+            var provider = app.Services.GetRequiredService<IApiVersionDescriptionProvider>();
+            foreach (var description in provider.ApiVersionDescriptions)
+            {
+                c.SwaggerEndpoint($"/quotation-requests/swagger/{description.GroupName}/swagger.json", description.GroupName.ToUpperInvariant());
+            }
+            c.RoutePrefix = "quotation-requests/swagger";
+        });
+    }
+
+    // MANDATORY: Prometheus metrics
+    app.UseHttpMetrics();
+    app.UseRateLimiter();
+    app.UseCors();
+
+    app.MapControllers();
+
+    // Health check endpoints
+    app.MapGet("/quotation-requests/liveness", () => "Healthy").AllowAnonymous();
+
+    app.MapHealthChecks("/quotation-requests/readiness", new HealthCheckOptions
+    {
+        Predicate = healthCheck => healthCheck.Tags.Contains("readiness"),
+        ResponseWriter = UIResponseWriter.WriteHealthCheckUIResponse
+    });
+
+    // MANDATORY: Prometheus metrics endpoint
+    app.MapMetrics("/quotation-requests/metrics");
+
+    // Safe database initialization - only for non-production environments
+    using (var scope = app.Services.CreateScope())
+    {
+        var context = scope.ServiceProvider.GetRequiredService<QuotationRequestDbContext>();
+        try
+        {
+            if (app.Environment.IsDevelopment() || app.Environment.IsEnvironment("Testing"))
+            {
+                // Check if connection string is configured
+                var connectionString = context.Database.GetConnectionString();
+                if (!string.IsNullOrEmpty(connectionString))
+                {
+                    if (context.Database.IsRelational())
+                    {
+                        context.Database.Migrate();
+                        Log.Information("Database migration completed for {Environment}", app.Environment.EnvironmentName);
+                    }
+                    else
+                    {
+                        context.Database.EnsureCreated();
+                        Log.Information("In-memory database created for {Environment}", app.Environment.EnvironmentName);
+                    }
+                }
+                else
+                {
+                    Log.Warning("No database connection string configured for {Environment} environment", app.Environment.EnvironmentName);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Database initialization failed for environment {Environment}", app.Environment.EnvironmentName);
+        }
+    }
+
+    Log.Information("Maliev Quotation Request Service started successfully");
+    app.Run();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Application terminated unexpectedly");
+}
+finally
+{
+    Log.CloseAndFlush();
+}
+
+// Make Program class accessible for integration tests
+public partial class Program
+{ }
