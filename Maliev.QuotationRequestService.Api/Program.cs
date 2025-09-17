@@ -13,7 +13,6 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
-using Prometheus;
 using Serilog;
 using Swashbuckle.AspNetCore.SwaggerGen;
 using System.Text;
@@ -185,7 +184,6 @@ try
     }
 
     // MANDATORY: Prometheus metrics
-    app.UseHttpMetrics();
     app.UseRateLimiter();
     app.UseCors();
 
@@ -201,7 +199,6 @@ try
     });
 
     // MANDATORY: Prometheus metrics endpoint
-    app.MapMetrics("/quotation-requests/metrics");
 
     // Safe database initialization - only for non-production environments
     using (var scope = app.Services.CreateScope())
